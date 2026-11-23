@@ -1,5 +1,5 @@
 /* تم للتحويلات — حفظ ملفات الواجهة على الجهاز: الشبكة أولاً، ثم النسخة المحفوظة عند انقطاع الاتصال */
-const CACHE = 'tamm-shell-v2';
+const CACHE = 'tamm-shell-v3';
 const CORE = ['./', 'index.html', 'engine.html', 'gas.js', 'code.js', 'app_engine.js', 'native.js', 'drive_bridge.gs', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/apple-touch-icon.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => Promise.all(CORE.map(u => c.add(u).catch(() => {})))).then(() => self.skipWaiting()));

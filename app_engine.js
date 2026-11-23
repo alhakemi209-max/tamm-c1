@@ -194,6 +194,10 @@ API_FNS.driveInfo = 1; API_FNS.driveLink = 1; API_FNS.driveKeep = 1;
   }
   function clone(v) { return v === undefined ? null : JSON.parse(JSON.stringify(v)); }
 
+  function confirmEmpty_() {
+    if (TAMM.mode === 'cloud' && !(TAMM.backend.serverSeen && TAMM.backend.serverSeen('t_users')))
+      throw new Error('تعذّر التأكد من بيانات النظام من السحابة. تحقق من الإنترنت ثم أعد فتح التطبيق.');
+  }
   TAMM.run = function (name, args) {
     return TAMM.bootPromise.then(async function () {
       if (!Object.prototype.hasOwnProperty.call(API_FNS, name) || typeof G[name] !== 'function') throw new Error('عملية غير معروفة.');
@@ -201,11 +205,14 @@ API_FNS.driveInfo = 1; API_FNS.driveLink = 1; API_FNS.driveKeep = 1;
       const keys = FN_SEQ[name];
       if (keys) await TAMM.seq.ensure(keys, 3 + maxLen(args, 2), seqFloor_);
       _lic = void 0; _touched = !1;
+      /* لا يُنشأ مدير النظام ولا تُعرض شاشة «أول تشغيل» إلا بعد أن تؤكد السحابة أن النظام فارغ فعلاً */
+      if (name === 'setupAdmin') confirmEmpty_();
       let r;
       try {
         r = G[name].apply(null, args);
         if (r && typeof r.then === 'function') r = await r;
       } finally { TAMM.flush(); }
+      if (name === 'getBootstrap' && r && r.needsSetup) confirmEmpty_();
       TAMM.seq.topUp(SEQ_KEYS, seqFloor_);
       return clone(r);
     });
@@ -316,6 +323,8 @@ API_FNS.driveInfo = 1; API_FNS.driveLink = 1; API_FNS.driveKeep = 1;
       TAMM.mode = 'local';
     }
     await TAMM.backend.init();
+    /* لا مستخدمين محلياً ولم تؤكد السحابة ذلك بعد: ننتظر تأكيدها قبل فتح الواجهة */
+    if (TAMM.mode === 'cloud' && !TAMM.list('t_users').length && TAMM.backend.waitServer) await TAMM.backend.waitServer('t_users', TAMM.bootWait || 30000);
     TAMM.ready = true;
     TAMM.seq.topUp(SEQ_KEYS, seqFloor_);
     TAMM.drive.on() && TAMM.driveQ.kick(8000);

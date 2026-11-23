@@ -393,31 +393,74 @@
       });
       return p;
     }
-    this.init = function () {
-      var app = fb.initializeApp({ apiKey: cfg.apiKey, authDomain: cfg.authDomain, projectId: cfg.projectId, storageBucket: cfg.storageBucket, messagingSenderId: cfg.messagingSenderId, appId: cfg.appId });
+    /* فتح قاعدة البيانات مع نسختها المحلية. إن كانت نسخة سابقة من التطبيق ما زالت تمسك التخزين المحلي
+       (إغلاق التطبيق ثم فتحه بسرعة) نعيد المحاولة حتى يتحرر، بدل العمل بذاكرة فارغة. */
+    var app, persistOk = false, noMulti = false, seen = {}, readyBy = {};
+    function wait(ms) { return new Promise(function (res) { setTimeout(res, ms); }); }
+    function openDb(n) {
+      app = fb.initializeApp({ apiKey: cfg.apiKey, authDomain: cfg.authDomain, projectId: cfg.projectId, storageBucket: cfg.storageBucket, messagingSenderId: cfg.messagingSenderId, appId: cfg.appId });
       db = fb.firestore(app); FV = fb.firestore.FieldValue;
       try { db.settings({ cacheSizeBytes: fb.firestore.CACHE_SIZE_UNLIMITED, ignoreUndefinedProperties: true, merge: true }); } catch (e) {}
       root = db.collection('tamm').doc('main');
-      var persist = db.enablePersistence ? db.enablePersistence({ synchronizeTabs: false }).catch(function () {}) : Promise.resolve();
-      return persist.then(function () { return self.signIn(app); }).then(function () { return self.load(); });
+      if (!db.enablePersistence) { persistOk = false; return Promise.resolve(); }
+      var multi = !noMulti;
+      return db.enablePersistence({ synchronizeTabs: multi }).then(function () { persistOk = true; }, function (e) {
+        persistOk = false;
+        var code = String(e && (e.code || e.message) || '');
+        if (/unimplemented/i.test(code)) { if (!multi) return; noMulti = true; }
+        if (n >= (TAMM.persistTries == null ? 6 : TAMM.persistTries) || !app || typeof app.delete !== 'function') return;
+        return wait(TAMM.persistWait == null ? (n ? 1500 : 400) : TAMM.persistWait)
+          .then(function () { return app.delete(); }).catch(function () {})
+          .then(function () { return openDb(n + 1); });
+      });
+    }
+    this.init = function () {
+      return openDb(0).then(function () { return self.signIn(app); }).then(function () { return self.load(); });
+    };
+    /* هل وصلت بيانات هذه المجموعة من السحابة فعلاً في هذا التشغيل؟ */
+    this.serverSeen = function (c) { return !!seen[c]; };
+    this.waitServer = function (c, ms) {
+      var msg = 'تعذّر التأكد من بيانات النظام من السحابة. تحقق من الإنترنت ثم أعد فتح التطبيق.';
+      if (seen[c]) return Promise.resolve();
+      return timeout((readyBy[c] || Promise.resolve()).then(function () { if (!seen[c]) throw new Error(msg); }), ms, msg);
     };
     this.signIn = function (app) {
       if (!cfg.syncEmail) return Promise.resolve();
       var auth = fb.auth(app);
       return new Promise(function (res) { var off = auth.onAuthStateChanged(function (u) { off(); res(u); }); }).then(function (u) {
-        if (u && String(u.email || '').toLowerCase() === String(cfg.syncEmail).toLowerCase()) return;
+        var same = u && String(u.email || '').toLowerCase() === String(cfg.syncEmail).toLowerCase();
+        /* الدخول المحفوظ قد يكون أُلغي (تغيير كلمة مرور المزامنة مثلاً): نتحقق منه، وعند رفضه ندخل من جديد */
+        var check = same && typeof u.getIdToken === 'function'
+          ? timeout(u.getIdToken(true).then(function () { return true; }), 3500, 'slow').catch(function (e) {
+              var m = String(e && (e.code || e.message) || e);
+              return !/token-expired|user-disabled|user-not-found|invalid-user-token|invalid-credential|requires-recent-login/i.test(m);
+            })
+          : Promise.resolve(!!same);
+        return check.then(function (valid) {
+          if (valid) return;
+          var out = u && typeof auth.signOut === 'function' ? auth.signOut().catch(function () {}) : Promise.resolve();
+          return out.then(function () { return login(); });
+        });
+      });
+      function login() {
         return timeout(auth.signInWithEmailAndPassword(cfg.syncEmail, cfg.syncPassword || ''), 20000, 'تعذّر الاتصال بالسحابة. تحقق من الإنترنت ثم أعد فتح التطبيق.').catch(function (e) {
           var m = String(e && (e.code || e.message) || e);
           if (/wrong-password|user-not-found|invalid-credential|invalid-login|invalid-email/i.test(m)) throw new Error('بيانات حساب المزامنة في ملف الإعداد غير صحيحة (syncEmail / syncPassword).');
           if (/network/i.test(m)) throw new Error('أول تشغيل يحتاج اتصالاً بالإنترنت لربط النسخة بالسحابة.');
           throw e;
         });
-      });
+      }
     };
     this.load = function () {
       var syncedKey = 'tamm_synced_' + cfg.projectId, synced = lsGet(syncedKey, {}), firsts = [];
-      var jobs = cols.map(function (c) {
-        return col(c).get({ source: 'cache' }).catch(function () { return { forEach: function () {} }; }).then(function (snap) {
+      var reads = cols.map(function (c) { return col(c).get({ source: 'cache' }).catch(function () { return { forEach: function () {} }; }); });
+      var jobs = Promise.all(reads).then(function (snaps) {
+        /* النسخة المحلية غير متاحة أو فارغة تماماً: لا نثق بعلامات «تمت المزامنة» وننتظر السحابة لكل المجموعات */
+        var total = 0;
+        snaps.forEach(function (sn) { sn.forEach(function () { total++; }); });
+        if (!persistOk || !total) synced = {};
+        cols.forEach(function (c, ci) {
+          var snap = snaps[ci];
           var maxU = 0;
           snap.forEach(function (d) {
             var x = d.data({ serverTimestamps: 'estimate' }) || {};
@@ -443,6 +486,7 @@
               }
               first = false;
               var sy = lsGet(syncedKey, {}); if (!sy[c]) { sy[c] = 1; lsSet(syncedKey, sy); }
+              seen[c] = true;
               gotServer();
               TAMM.setStatus({ online: true });
             } else if (!s.metadata.hasPendingWrites && first) TAMM.setStatus({ online: false });
@@ -452,12 +496,16 @@
             TAMM.setStatus({ error: /permission|insufficient/i.test(m) ? 'لا تملك هذه النسخة صلاحية قراءة قاعدة البيانات. راجع قواعد Firestore وحساب المزامنة.' : 'انقطعت المزامنة: ' + m });
             gotServer();
           });
+          readyBy[c] = ready;
           if (!synced[c]) firsts.push(ready);
         });
       });
-      return Promise.all(jobs).then(function () {
+      return jobs.then(function () {
         if (!firsts.length) return;
-        return timeout(Promise.all(firsts), 45000, 'أول تشغيل يحتاج اتصالاً بالإنترنت لتحميل البيانات من السحابة. تحقق من الاتصال ثم أعد فتح التطبيق.');
+        var had = Object.keys(lsGet(syncedKey, {})).length > 0;
+        return timeout(Promise.all(firsts), TAMM.bootWait || 45000, had
+          ? 'تعذّر فتح النسخة المحلية من البيانات على هذا الجهاز، ويلزم اتصال بالإنترنت لتحميلها من السحابة. تحقق من الاتصال ثم أعد المحاولة.'
+          : 'أول تشغيل يحتاج اتصالاً بالإنترنت لتحميل البيانات من السحابة. تحقق من الاتصال ثم أعد فتح التطبيق.');
       });
     };
     this.commit = function (ops) {
