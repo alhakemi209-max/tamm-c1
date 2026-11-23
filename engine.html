@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html lang="ar"><head><meta charset="UTF-8"><title>engine</title></head>
+<body>
+<script src="gas.js"></script>
+<script src="code.js"></script>
+<script src="app_engine.js"></script>
+<script>
+TAMM.started = TAMM.start().then(
+  function (m) { return { ok: true, mode: m }; },
+  function (e) { return { ok: false, error: String(e && e.message || e) }; });
+</script>
+</body></html>
